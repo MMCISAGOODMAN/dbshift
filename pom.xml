@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.dbshift</groupId>
+    <artifactId>dbshift-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>dbshift-parent</name>
+    <description>Lightweight database migration framework for small teams</description>
+
+    <modules>
+        <module>dbshift-core</module>
+        <module>dbshift-spring-boot-starter</module>
+    </modules>
+
+    <properties>
+        <java.version>17</java.version>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <jsqlparser.version>4.9</jsqlparser.version>
+        <snakeyaml.version>2.2</snakeyaml.version>
+        <junit.version>5.10.2</junit.version>
+    </properties>
+</project>

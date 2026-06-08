@@ -1,0 +1,9 @@
+-- V003: create orders table
+CREATE TABLE IF NOT EXISTS orders (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+    amount DECIMAL(10, 2) NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_orders_user FOREIGN KEY (user_id) REFERENCES users(id)
+);

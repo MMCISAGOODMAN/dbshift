@@ -1,0 +1,7 @@
+-- V001: create users table
+CREATE TABLE IF NOT EXISTS users (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    username VARCHAR(64) NOT NULL UNIQUE,
+    email VARCHAR(128),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
