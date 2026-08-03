@@ -46,6 +46,16 @@ public class ConfigLoader {
                 auto.setTargetVersion(resolve(auto.getTargetVersion()));
             }
         }
+        if (config.getBaselineVersion() != null) {
+            config.setBaselineVersion(resolve(config.getBaselineVersion()));
+        }
+        if (config.getPlaceholders() != null && !config.getPlaceholders().isEmpty()) {
+            Map<String, String> resolved = new java.util.LinkedHashMap<>();
+            for (Map.Entry<String, String> entry : config.getPlaceholders().entrySet()) {
+                resolved.put(entry.getKey(), resolve(entry.getValue()));
+            }
+            config.setPlaceholders(resolved);
+        }
     }
 
     String resolve(String value) {

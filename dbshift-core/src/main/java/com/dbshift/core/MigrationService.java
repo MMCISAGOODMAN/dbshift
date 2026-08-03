@@ -6,8 +6,10 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -22,8 +24,10 @@ import com.dbshift.model.MigrateResult;
 import com.dbshift.model.MigrationFile;
 import com.dbshift.model.MigrationPlan;
 import com.dbshift.model.MigrationStatus;
+import com.dbshift.model.RepairResult;
 import com.dbshift.model.RollbackPlan;
 import com.dbshift.model.ValidationResult;
+import com.dbshift.model.Version;
 
 public class MigrationService {
 
@@ -34,6 +38,8 @@ public class MigrationService {
     private final MigrationExecutor migrationExecutor;
     private final SqlImpactAnalyzer sqlImpactAnalyzer;
     private final SchemaDiffService schemaDiffService;
+    private final MigrationLock migrationLock;
+    private final PlaceholderResolver placeholderResolver;
 
     public MigrationService(ConnectionFactory connectionFactory,
                             ChangelogRepository changelogRepository,
@@ -41,7 +47,9 @@ public class MigrationService {
                             MigrationValidator migrationValidator,
                             MigrationExecutor migrationExecutor,
                             SqlImpactAnalyzer sqlImpactAnalyzer,
-                            SchemaDiffService schemaDiffService) {
+                            SchemaDiffService schemaDiffService,
+                            MigrationLock migrationLock,
+                            PlaceholderResolver placeholderResolver) {
         this.connectionFactory = connectionFactory;
         this.changelogRepository = changelogRepository;
         this.migrationLoader = migrationLoader;
@@ -49,6 +57,8 @@ public class MigrationService {
         this.migrationExecutor = migrationExecutor;
         this.sqlImpactAnalyzer = sqlImpactAnalyzer;
         this.schemaDiffService = schemaDiffService;
+        this.migrationLock = migrationLock;
+        this.placeholderResolver = placeholderResolver;
     }
 
     public void init(String envName, DbshiftConfig config) throws SQLException {
@@ -56,6 +66,32 @@ public class MigrationService {
         DatabaseDialect dialect = DialectResolver.resolve(env);
         try (Connection conn = connectionFactory.open(env)) {
             changelogRepository.initTable(conn, dialect);
+            migrationLock.init(conn, dialect);
+        }
+    }
+
+    public void baseline(String envName, DbshiftConfig config, String baselineVersion, String appliedBy)
+            throws SQLException {
+        EnvironmentConfig env = config.requireEnvironment(envName);
+        DatabaseDialect dialect = DialectResolver.resolve(env);
+        Version version = normalizeBaselineVersion(baselineVersion);
+        try (Connection conn = connectionFactory.open(env)) {
+            if (!changelogRepository.tableExists(conn, dialect, env)) {
+                changelogRepository.initTable(conn, dialect);
+                migrationLock.init(conn, dialect);
+            }
+            Optional<ChangelogEntry> existing = changelogRepository.findByVersion(conn, version.display());
+            if (existing.isPresent()) {
+                throw new IllegalStateException("Baseline version already present: " + version.display());
+            }
+            if (changelogRepository.baselineVersion(conn).isPresent()) {
+                throw new IllegalStateException("Database already baselined");
+            }
+            List<ChangelogEntry> applied = changelogRepository.findAllApplied(conn, dialect);
+            if (!applied.isEmpty()) {
+                throw new IllegalStateException("Cannot baseline: migrations already applied");
+            }
+            changelogRepository.insertBaseline(conn, version, appliedBy == null ? "baseline" : appliedBy, dialect);
         }
     }
 
@@ -78,16 +114,19 @@ public class MigrationService {
             Optional<String> latest = changelogRepository.latestAppliedVersion(conn, dialect);
             latest.ifPresent(status::setLatestAppliedVersion);
 
-            Set<String> appliedVersions = applied.stream()
-                    .map(ChangelogEntry::getVersion)
-                    .collect(Collectors.toCollection(HashSet::new));
+            Set<String> appliedKeys = appliedVersions(applied);
+            Optional<Version> baseline = changelogRepository.baselineVersion(conn);
 
             List<MigrationFile> pending = allMigrations.stream()
-                    .filter(m -> !appliedVersions.contains(m.getVersion()))
+                    .filter(m -> !isApplied(m, appliedKeys))
+                    .filter(m -> !isAtOrBelowBaseline(m, baseline))
                     .collect(Collectors.toList());
             status.setPending(pending);
 
             for (ChangelogEntry entry : applied) {
+                if ("BASELINE".equalsIgnoreCase(entry.getScriptType())) {
+                    continue;
+                }
                 if (migrationLoader.findRollback(rollbacks, entry.getVersion()) == null) {
                     status.getMissingRollbackScripts().add(entry.getVersion());
                 }
@@ -108,30 +147,37 @@ public class MigrationService {
 
         List<MigrationFile> pending = new ArrayList<>(status.getPending());
         if (targetVersion != null && !targetVersion.isBlank()) {
-            int targetNum = parseVersionNumber(targetVersion);
+            Version target = Version.parse(targetVersion.startsWith("V") || targetVersion.startsWith("v")
+                    ? targetVersion : "V" + targetVersion);
             pending = pending.stream()
-                    .filter(m -> m.versionNumber() <= targetNum)
+                    .filter(m -> m.getParsedVersion().compareTo(target) <= 0)
                     .collect(Collectors.toList());
-            plan.setTargetVersion(normalizeVersion(targetVersion));
+            plan.setTargetVersion(target.display());
         } else if (!pending.isEmpty()) {
             plan.setTargetVersion(pending.get(pending.size() - 1).getVersion());
         } else {
             plan.setTargetVersion(status.getLatestAppliedVersion());
         }
 
+        List<MigrationFile> repeatables = pendingRepeatables(envName, config);
+        pending.addAll(repeatables);
         plan.setPending(pending);
+
         for (MigrationFile file : pending) {
-            plan.getImpacts().addAll(sqlImpactAnalyzer.analyzeMigration(file.getSql(), dialect));
+            String sql = placeholderResolver.apply(file.getSql());
+            plan.getImpacts().addAll(sqlImpactAnalyzer.analyzeMigration(sql, dialect));
         }
 
         if (!status.getMissingRollbackScripts().isEmpty()) {
             plan.getWarnings().add("Missing rollback scripts for: "
                     + String.join(", ", status.getMissingRollbackScripts()));
         }
+        if (!repeatables.isEmpty()) {
+            plan.getWarnings().add("Includes " + repeatables.size() + " repeatable migration(s).");
+        }
 
         dialect.ddlTransactionWarning().ifPresent(plan.getWarnings()::add);
         plan.getWarnings().addAll(analyzeHighRiskWarnings(plan));
-
         return plan;
     }
 
@@ -139,25 +185,12 @@ public class MigrationService {
                                  boolean requireConfirm, boolean confirmed, String appliedBy)
             throws IOException, SQLException {
         if (requireConfirm && !confirmed) {
-            MigrateResult blocked = new MigrateResult();
-            blocked.setSuccess(false);
-            blocked.setErrorMessage("Production migration requires confirmed=true.");
-            return blocked;
+            return fail("Production migration requires confirmed=true.");
         }
 
         ValidationResult validation = migrationValidator.validate(config);
         if (!validation.isValid()) {
-            MigrateResult failed = new MigrateResult();
-            failed.setSuccess(false);
-            failed.setErrorMessage(String.join("; ", validation.getErrors()));
-            return failed;
-        }
-
-        MigrationPlan plan = plan(envName, config, targetVersion, false);
-        if (plan.getPending().isEmpty()) {
-            MigrateResult empty = new MigrateResult();
-            empty.setSuccess(true);
-            return empty;
+            return fail(String.join("; ", validation.getErrors()));
         }
 
         EnvironmentConfig env = config.requireEnvironment(envName);
@@ -167,30 +200,99 @@ public class MigrationService {
 
         try (Connection conn = connectionFactory.open(env)) {
             if (!changelogRepository.tableExists(conn, dialect, env)) {
-                changelogRepository.initTable(conn, dialect);
+                if (config.isBaselineOnMigrate()) {
+                    changelogRepository.initTable(conn, dialect);
+                    migrationLock.init(conn, dialect);
+                    changelogRepository.insertBaseline(
+                            conn,
+                            normalizeBaselineVersion(config.getBaselineVersion()),
+                            appliedBy == null ? "baseline" : appliedBy,
+                            dialect);
+                } else {
+                    changelogRepository.initTable(conn, dialect);
+                    migrationLock.init(conn, dialect);
+                }
             }
 
-            List<ChangelogEntry> applied = changelogRepository.findAllApplied(conn, dialect);
-            ValidationResult checksumValidation = migrationValidator.validateChecksums(config, applied);
-            if (!checksumValidation.isValid()) {
-                aggregate.setSuccess(false);
-                aggregate.setErrorMessage(String.join("; ", checksumValidation.getErrors()));
-                return aggregate;
-            }
+            migrationLock.acquire(conn, dialect);
+            try {
+                List<ChangelogEntry> applied = changelogRepository.findAllApplied(conn, dialect);
+                ValidationResult checksumValidation = migrationValidator.validateChecksums(config, applied);
+                if (!checksumValidation.isValid()) {
+                    return fail(String.join("; ", checksumValidation.getErrors()));
+                }
 
-            for (MigrationFile file : plan.getPending()) {
-                MigrateResult single = migrationExecutor.executeMigration(
-                        conn, file, appliedBy, changelogRepository, dialect);
-                if (!single.isSuccess()) {
-                    aggregate.setSuccess(false);
-                    aggregate.setFailedVersion(single.getFailedVersion());
-                    aggregate.setErrorMessage(single.getErrorMessage());
+                MigrationPlan plan = plan(envName, config, targetVersion, false);
+                if (plan.getPending().isEmpty()) {
+                    aggregate.setSuccess(true);
                     return aggregate;
                 }
-                aggregate.getExecutedVersions().addAll(single.getExecutedVersions());
+
+                for (MigrationFile file : plan.getPending()) {
+                    MigrateResult single = migrationExecutor.executeMigration(
+                            conn, file, appliedBy, changelogRepository, dialect);
+                    if (!single.isSuccess()) {
+                        aggregate.setSuccess(false);
+                        aggregate.setFailedVersion(single.getFailedVersion());
+                        aggregate.setErrorMessage(single.getErrorMessage());
+                        return aggregate;
+                    }
+                    aggregate.getExecutedVersions().addAll(single.getExecutedVersions());
+                }
+            } finally {
+                migrationLock.release(conn, dialect);
             }
         }
         return aggregate;
+    }
+
+    public RepairResult repair(String envName, DbshiftConfig config) throws IOException, SQLException {
+        RepairResult result = new RepairResult();
+        EnvironmentConfig env = config.requireEnvironment(envName);
+        DatabaseDialect dialect = DialectResolver.resolve(env);
+
+        try (Connection conn = connectionFactory.open(env)) {
+            if (!changelogRepository.tableExists(conn, dialect, env)) {
+                result.setSuccess(false);
+                result.setErrorMessage("Changelog table does not exist");
+                return result;
+            }
+            migrationLock.acquire(conn, dialect);
+            try {
+                List<MigrationFile> migrations = migrationLoader.loadMigrations(
+                        Path.of(config.getMigrations().getDir()));
+                List<MigrationFile> repeatables = migrationLoader.loadRepeatables(
+                        Path.of(config.getMigrations().getDir()));
+
+                List<ChangelogEntry> applied = changelogRepository.findAllApplied(conn, dialect);
+                for (ChangelogEntry entry : applied) {
+                    if ("BASELINE".equalsIgnoreCase(entry.getScriptType())) {
+                        continue;
+                    }
+                    MigrationFile file = migrationLoader.findMigration(migrations, entry.getVersion());
+                    if (file != null && !file.getChecksum().equals(entry.getChecksum())) {
+                        changelogRepository.updateChecksum(conn, entry.getVersion(), file.getChecksum());
+                        result.getRepairedChecksums().add(entry.getVersion());
+                    }
+                }
+
+                for (ChangelogEntry entry : changelogRepository.findRepeatables(conn, dialect)) {
+                    MigrationFile file = migrationLoader.findRepeatable(repeatables, entry.getVersion());
+                    if (file != null && !file.getChecksum().equals(entry.getChecksum())) {
+                        changelogRepository.updateChecksum(conn, entry.getVersion(), file.getChecksum());
+                        result.getRepairedChecksums().add(entry.getVersion());
+                    }
+                }
+
+                for (ChangelogEntry failed : safeFindFailed(conn)) {
+                    changelogRepository.deleteVersion(conn, failed.getVersion());
+                    result.getRemovedFailed().add(failed.getVersion());
+                }
+            } finally {
+                migrationLock.release(conn, dialect);
+            }
+        }
+        return result;
     }
 
     public RollbackPlan rollbackPlan(String envName, DbshiftConfig config, int steps, boolean dryRun)
@@ -203,13 +305,14 @@ public class MigrationService {
         DatabaseDialect dialect = DialectResolver.resolve(env);
         MigrationStatus status = status(envName, config);
         List<ChangelogEntry> applied = new ArrayList<>(status.getApplied());
+        applied.removeIf(e -> "BASELINE".equalsIgnoreCase(e.getScriptType()));
         if (applied.isEmpty()) {
             throw new IllegalStateException("No migrations applied in " + envName);
         }
 
-        applied.sort(Comparator.comparing(ChangelogEntry::getVersion));
+        applied.sort(Comparator.comparing(e -> Version.parse(e.getVersion())));
         int startIndex = Math.max(0, applied.size() - steps);
-        List<ChangelogEntry> toRollback = applied.subList(startIndex, applied.size());
+        List<ChangelogEntry> toRollback = new ArrayList<>(applied.subList(startIndex, applied.size()));
         java.util.Collections.reverse(toRollback);
 
         List<MigrationFile> rollbacks = migrationLoader.loadRollbacks(Path.of(config.getRollback().getDir()));
@@ -226,7 +329,8 @@ public class MigrationService {
                 continue;
             }
             plan.getRollbackScripts().add(rollback);
-            plan.getImpacts().addAll(sqlImpactAnalyzer.analyzeMigration(rollback.getSql(), dialect));
+            plan.getImpacts().addAll(sqlImpactAnalyzer.analyzeMigration(
+                    placeholderResolver.apply(rollback.getSql()), dialect));
         }
 
         if (!toRollback.isEmpty()) {
@@ -252,43 +356,44 @@ public class MigrationService {
             return preview;
         }
         if (!confirmed) {
-            MigrateResult blocked = new MigrateResult();
-            blocked.setSuccess(false);
-            blocked.setErrorMessage("Rollback execution requires confirmed=true.");
-            return blocked;
+            return fail("Rollback execution requires confirmed=true.");
         }
         if (!plan.getWarnings().stream().filter(w -> w.startsWith("Missing rollback")).toList().isEmpty()) {
-            MigrateResult failed = new MigrateResult();
-            failed.setSuccess(false);
-            failed.setErrorMessage("Cannot rollback: missing rollback scripts.");
-            return failed;
+            return fail("Cannot rollback: missing rollback scripts.");
         }
 
         MigrationStatus status = status(envName, config);
         List<ChangelogEntry> applied = new ArrayList<>(status.getApplied());
-        applied.sort(Comparator.comparing(ChangelogEntry::getVersion));
+        applied.removeIf(e -> "BASELINE".equalsIgnoreCase(e.getScriptType()));
+        applied.sort(Comparator.comparing(e -> Version.parse(e.getVersion())));
         int startIndex = Math.max(0, applied.size() - steps);
-        List<ChangelogEntry> toRollback = applied.subList(startIndex, applied.size());
+        List<ChangelogEntry> toRollback = new ArrayList<>(applied.subList(startIndex, applied.size()));
         java.util.Collections.reverse(toRollback);
 
         EnvironmentConfig env = config.requireEnvironment(envName);
+        DatabaseDialect dialect = DialectResolver.resolve(env);
         MigrateResult aggregate = new MigrateResult();
         aggregate.setSuccess(true);
 
         try (Connection conn = connectionFactory.open(env)) {
-            for (ChangelogEntry entry : toRollback) {
-                MigrationFile rollback = migrationLoader.findRollback(
-                        migrationLoader.loadRollbacks(Path.of(config.getRollback().getDir())),
-                        entry.getVersion());
-                MigrateResult single = migrationExecutor.executeRollback(
-                        conn, rollback, entry.getVersion(), appliedBy, changelogRepository);
-                if (!single.isSuccess()) {
-                    aggregate.setSuccess(false);
-                    aggregate.setFailedVersion(single.getFailedVersion());
-                    aggregate.setErrorMessage(single.getErrorMessage());
-                    return aggregate;
+            migrationLock.acquire(conn, dialect);
+            try {
+                for (ChangelogEntry entry : toRollback) {
+                    MigrationFile rollback = migrationLoader.findRollback(
+                            migrationLoader.loadRollbacks(Path.of(config.getRollback().getDir())),
+                            entry.getVersion());
+                    MigrateResult single = migrationExecutor.executeRollback(
+                            conn, rollback, entry.getVersion(), appliedBy, changelogRepository);
+                    if (!single.isSuccess()) {
+                        aggregate.setSuccess(false);
+                        aggregate.setFailedVersion(single.getFailedVersion());
+                        aggregate.setErrorMessage(single.getErrorMessage());
+                        return aggregate;
+                    }
+                    aggregate.getExecutedVersions().addAll(single.getExecutedVersions());
                 }
-                aggregate.getExecutedVersions().addAll(single.getExecutedVersions());
+            } finally {
+                migrationLock.release(conn, dialect);
             }
         }
         return aggregate;
@@ -325,6 +430,76 @@ public class MigrationService {
         return diff;
     }
 
+    private List<MigrationFile> pendingRepeatables(String envName, DbshiftConfig config)
+            throws IOException, SQLException {
+        EnvironmentConfig env = config.requireEnvironment(envName);
+        DatabaseDialect dialect = DialectResolver.resolve(env);
+        List<MigrationFile> repeatables = migrationLoader.loadRepeatables(
+                Path.of(config.getMigrations().getDir()));
+        if (repeatables.isEmpty()) {
+            return List.of();
+        }
+        try (Connection conn = connectionFactory.open(env)) {
+            if (!changelogRepository.tableExists(conn, dialect, env)) {
+                return repeatables;
+            }
+            Map<String, String> appliedChecksums = new HashMap<>();
+            for (ChangelogEntry entry : changelogRepository.findRepeatables(conn, dialect)) {
+                appliedChecksums.put(entry.getVersion(), entry.getChecksum());
+            }
+            return repeatables.stream()
+                    .filter(r -> !r.getChecksum().equals(appliedChecksums.get(r.getVersion())))
+                    .collect(Collectors.toList());
+        }
+    }
+
+    private Set<String> appliedVersions(List<ChangelogEntry> applied) {
+        Set<String> keys = new HashSet<>();
+        for (ChangelogEntry entry : applied) {
+            try {
+                keys.add(Version.parse(entry.getVersion()).display());
+            } catch (Exception e) {
+                keys.add(entry.getVersion());
+            }
+        }
+        return keys;
+    }
+
+    private boolean isApplied(MigrationFile file, Set<String> appliedKeys) {
+        return appliedKeys.contains(file.getParsedVersion().display())
+                || appliedKeys.contains(file.getVersion());
+    }
+
+    private boolean isAtOrBelowBaseline(MigrationFile file, Optional<Version> baseline) {
+        return baseline.isPresent() && file.getParsedVersion().compareTo(baseline.get()) <= 0;
+    }
+
+    private Version normalizeBaselineVersion(String baselineVersion) {
+        if (baselineVersion == null || baselineVersion.isBlank()) {
+            return Version.parse("V1");
+        }
+        String v = baselineVersion.trim();
+        if (!v.toUpperCase().startsWith("V") && !v.toUpperCase().startsWith("U")) {
+            v = "V" + v;
+        }
+        return Version.parse(v);
+    }
+
+    private List<ChangelogEntry> safeFindFailed(Connection conn) throws SQLException {
+        try {
+            return changelogRepository.findFailed(conn);
+        } catch (SQLException e) {
+            return List.of();
+        }
+    }
+
+    private MigrateResult fail(String message) {
+        MigrateResult failed = new MigrateResult();
+        failed.setSuccess(false);
+        failed.setErrorMessage(message);
+        return failed;
+    }
+
     private List<String> analyzeHighRiskWarnings(MigrationPlan plan) {
         List<String> warnings = new ArrayList<>();
         long highRisk = plan.getImpacts().stream()
@@ -334,14 +509,5 @@ public class MigrationService {
             warnings.add("Plan contains " + highRisk + " high-risk SQL statement(s).");
         }
         return warnings;
-    }
-
-    private int parseVersionNumber(String version) {
-        return Integer.parseInt(version.replaceFirst("(?i)^V", ""));
-    }
-
-    private String normalizeVersion(String version) {
-        int num = parseVersionNumber(version);
-        return "V" + String.format("%03d", num);
     }
 }

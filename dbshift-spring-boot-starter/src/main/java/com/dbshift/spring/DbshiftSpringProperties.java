@@ -17,6 +17,12 @@ public class DbshiftSpringProperties {
     /** Fail application startup if migration fails. */
     private boolean failOnError = true;
 
+    /**
+     * When true and a {@link javax.sql.DataSource} bean exists, use it instead of
+     * jdbc url/user/password from dbshift.yaml.
+     */
+    private boolean useDataSource = true;
+
     public boolean isAutoMigrate() {
         return autoMigrate;
     }
@@ -47,5 +53,13 @@ public class DbshiftSpringProperties {
 
     public void setFailOnError(boolean failOnError) {
         this.failOnError = failOnError;
+    }
+
+    public boolean isUseDataSource() {
+        return useDataSource;
+    }
+
+    public void setUseDataSource(boolean useDataSource) {
+        this.useDataSource = useDataSource;
     }
 }

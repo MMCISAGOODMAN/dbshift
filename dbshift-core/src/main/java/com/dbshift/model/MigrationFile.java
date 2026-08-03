@@ -5,7 +5,7 @@ import java.nio.file.Path;
 public class MigrationFile {
 
     public enum ScriptType {
-        MIGRATION, ROLLBACK
+        MIGRATION, ROLLBACK, REPEATABLE, BASELINE
     }
 
     private final String version;
@@ -14,6 +14,7 @@ public class MigrationFile {
     private final String checksum;
     private final ScriptType scriptType;
     private final String sql;
+    private final Version parsedVersion;
 
     public MigrationFile(String version, String description, Path path, String checksum,
                          ScriptType scriptType, String sql) {
@@ -23,6 +24,9 @@ public class MigrationFile {
         this.checksum = checksum;
         this.scriptType = scriptType;
         this.sql = sql;
+        this.parsedVersion = (scriptType == ScriptType.MIGRATION || scriptType == ScriptType.ROLLBACK)
+                ? Version.parse(version)
+                : null;
     }
 
     public String getVersion() {
@@ -49,7 +53,24 @@ public class MigrationFile {
         return sql;
     }
 
+    public Version getParsedVersion() {
+        return parsedVersion;
+    }
+
+    /** @deprecated use {@link #getParsedVersion()} */
+    @Deprecated
     public int versionNumber() {
-        return Integer.parseInt(version.replaceFirst("^V|^U", ""));
+        if (parsedVersion == null || parsedVersion.parts().isEmpty()) {
+            return 0;
+        }
+        return parsedVersion.parts().get(0);
+    }
+
+    public boolean isRepeatable() {
+        return scriptType == ScriptType.REPEATABLE;
+    }
+
+    public boolean isVersioned() {
+        return scriptType == ScriptType.MIGRATION;
     }
 }

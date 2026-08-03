@@ -14,6 +14,8 @@ public interface DatabaseDialect {
 
     String createChangelogTableSql();
 
+    String createLockTableSql();
+
     /**
      * WHERE clause fragment for filtering successful migration rows.
      */
@@ -21,6 +23,10 @@ public interface DatabaseDialect {
 
     /** Literal used when inserting a successful changelog row. */
     String successLiteral();
+
+    String lockedTrueLiteral();
+
+    String lockedFalseLiteral();
 
     boolean supportsDdlInTransaction();
 

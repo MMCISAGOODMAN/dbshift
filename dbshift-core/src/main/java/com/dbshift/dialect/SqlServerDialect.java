@@ -10,7 +10,7 @@ public final class SqlServerDialect extends AbstractDatabaseDialect {
     private static final String CHANGELOG_DDL = """
             IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'schema_changelog')
             CREATE TABLE schema_changelog (
-                version VARCHAR(32) PRIMARY KEY,
+                version VARCHAR(100) PRIMARY KEY,
                 description VARCHAR(255) NOT NULL,
                 checksum VARCHAR(64) NOT NULL,
                 applied_at DATETIME2 NOT NULL,
@@ -18,6 +18,16 @@ public final class SqlServerDialect extends AbstractDatabaseDialect {
                 execution_ms INT NOT NULL,
                 success BIT NOT NULL DEFAULT 1,
                 script_type VARCHAR(16) NOT NULL DEFAULT 'MIGRATION'
+            )
+            """;
+
+    private static final String LOCK_DDL = """
+            IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'schema_changelog_lock')
+            CREATE TABLE schema_changelog_lock (
+                id INT PRIMARY KEY,
+                locked BIT NOT NULL,
+                locked_by VARCHAR(255),
+                locked_at DATETIME2
             )
             """;
 
@@ -37,6 +47,11 @@ public final class SqlServerDialect extends AbstractDatabaseDialect {
     }
 
     @Override
+    public String createLockTableSql() {
+        return LOCK_DDL;
+    }
+
+    @Override
     public String successFilter() {
         return "success = 1";
     }
@@ -44,6 +59,16 @@ public final class SqlServerDialect extends AbstractDatabaseDialect {
     @Override
     public String successLiteral() {
         return "1";
+    }
+
+    @Override
+    public String lockedTrueLiteral() {
+        return "1";
+    }
+
+    @Override
+    public String lockedFalseLiteral() {
+        return "0";
     }
 
     @Override

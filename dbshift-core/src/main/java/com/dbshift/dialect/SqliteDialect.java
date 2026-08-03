@@ -28,6 +28,16 @@ public final class SqliteDialect extends AbstractDatabaseDialect {
     }
 
     @Override
+    public String lockedTrueLiteral() {
+        return "1";
+    }
+
+    @Override
+    public String lockedFalseLiteral() {
+        return "0";
+    }
+
+    @Override
     public MetadataParams metadataParams(Connection conn, EnvironmentConfig config) throws SQLException {
         String schema = config.getSchema();
         if (schema != null && !schema.isBlank()) {

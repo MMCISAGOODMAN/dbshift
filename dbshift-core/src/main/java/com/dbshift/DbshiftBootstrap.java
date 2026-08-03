@@ -82,7 +82,7 @@ public final class DbshiftBootstrap {
             throw new DbshiftException("Migration validation failed: " + String.join("; ", validation.getErrors()));
         }
 
-        if (auto.isInitOnStartup()) {
+        if (auto.isInitOnStartup() && !engine.config().isBaselineOnMigrate()) {
             engine.init(env);
         }
 

@@ -11,7 +11,7 @@ public final class OracleDialect extends AbstractDatabaseDialect {
             BEGIN
                 EXECUTE IMMEDIATE '
                     CREATE TABLE schema_changelog (
-                        version VARCHAR2(32) PRIMARY KEY,
+                        version VARCHAR2(100) PRIMARY KEY,
                         description VARCHAR2(255) NOT NULL,
                         checksum VARCHAR2(64) NOT NULL,
                         applied_at TIMESTAMP NOT NULL,
@@ -51,6 +51,36 @@ public final class OracleDialect extends AbstractDatabaseDialect {
     @Override
     public String successLiteral() {
         return "1";
+    }
+
+    @Override
+    public String createLockTableSql() {
+        return """
+                BEGIN
+                    EXECUTE IMMEDIATE '
+                        CREATE TABLE schema_changelog_lock (
+                            id NUMBER(10) PRIMARY KEY,
+                            locked NUMBER(1) NOT NULL,
+                            locked_by VARCHAR2(255),
+                            locked_at TIMESTAMP
+                        )';
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        IF SQLCODE != -955 THEN
+                            RAISE;
+                        END IF;
+                END;
+                """;
+    }
+
+    @Override
+    public String lockedTrueLiteral() {
+        return "1";
+    }
+
+    @Override
+    public String lockedFalseLiteral() {
+        return "0";
     }
 
     @Override

@@ -9,7 +9,8 @@
 | 模块 | 说明 |
 |------|------|
 | `dbshift-core` | 迁移引擎框架，提供 `DbshiftEngine` API（无 JDBC 驱动依赖） |
-| `dbshift-spring-boot-starter` | Spring Boot 启动时自动迁移（可选） |
+| `dbshift-cli` | 命令行工具：info / migrate / validate / baseline / repair 等 |
+| `dbshift-spring-boot-starter` | Spring Boot 启动时自动迁移（可选，支持注入 DataSource） |
 
 ## 支持的数据库
 
@@ -26,16 +27,27 @@
 | Oracle | `jdbc:oracle:` | `oracle` |
 | 其他 | 任意 JDBC URL | `generic`（通用 ANSI SQL） |
 
-迁移脚本（`V001__*.sql`）由你按目标数据库编写，与 Flyway / Liquibase 一样由使用方负责方言差异。
+迁移脚本由你按目标数据库编写，与 Flyway / Liquibase 一样由使用方负责方言差异。
 
-## 功能
+## 功能（Flyway Community 对标 + 增强）
 
-- SQL 文件版本化管理（`V001__xxx.sql` / `U001__xxx.sql`）
-- `schema_changelog` 版本追踪 + checksum 防篡改
-- Dry-run 执行计划（Markdown / HTML 报告）
-- 回滚预览与执行（需手写 U 脚本）
-- 多环境版本 diff + schema diff（基于 JDBC 元数据，数据库无关）
-- SQL 影响分析与风险等级标注（按方言提示 DDL 事务行为）
+**对标 Flyway Community：**
+
+- Versioned 迁移：`V1__` / `V001__` / `V1_2__` / `V1.2.3__`
+- Repeatable 迁移：`R__description.sql`（checksum 变化时重跑）
+- Undo 回滚：`U1__`（社区版 Flyway 无，DbShift 内置）
+- `baseline` / `baselineOnMigrate`：接管已有库
+- SQL Placeholder：`${schema}` / `${name:default}`
+- 迁移锁：`schema_changelog_lock`，防多实例并发
+- `repair`：对齐 checksum、清理失败记录
+- CLI：`info` / `migrate` / `validate` / `baseline` / `repair` / `plan` / `rollback` / `diff`
+- Spring Boot：可注入业务 `DataSource`
+
+**DbShift 增强：**
+
+- Dry-run 执行计划（Markdown / HTML）+ SQL 风险分析
+- 多环境版本 diff + schema diff
+- 生产环境 `requireConfirmForProd` 防呆
 
 ## 与其他框架对比
 
@@ -109,13 +121,15 @@ Flyway / Liquibase 通常需按环境拆配置或靠 CI 脚本拼装。
 | JDBC 驱动 | 使用方提供 | 使用方提供 | 使用方提供 |
 | 变更表达方式 | 纯 SQL 文件 | 纯 SQL 文件 | SQL / XML / YAML / JSON |
 | 程序化 API | **核心能力** | 有，非首要 | 有，非首要 |
+| Repeatable / Baseline / Repair | ✅ | ✅ | ✅ / 部分 |
+| Undo（社区） | ✅ U 脚本 | ❌（Teams） | ✅ |
+| 迁移锁 | ✅ | ✅ | ✅ |
+| Placeholder | ✅ | ✅ | ✅ |
 | 多环境 diff | **内置** | 需自建 | 需自建 |
 | Schema diff | **内置** | 无（需第三方） | 有部分能力 |
 | SQL 风险分析 | **内置** | 无 | 有限 |
 | 执行计划报告 | **Markdown / HTML** | 基础 | 中等 |
 | 社区 / 生态 | 新、小 | 最大 | 大 |
-| 企业功能 | 无 | 商业版（undo 等） | 商业版 |
-| 自动生成回滚 | 无 | 无（社区版） | 部分支持 |
 | 适合团队规模 | 小团队 | 中小到大型 | 中大型企业 |
 
 ### 选型建议
@@ -247,9 +261,10 @@ dbshift:
   config-file: ./dbshift.yaml
   environment: dev          # 可选，覆盖 yaml 中的 environment
   fail-on-error: true
+  use-data-source: true     # 默认 true：优先使用 Spring DataSource
 ```
 
-**无需写任何代码**，Spring Boot 启动时会自动执行迁移。
+**无需写任何代码**，Spring Boot 启动时会自动执行迁移；`use-data-source: true` 时使用业务连接池。
 
 ### 行为说明
 
@@ -286,7 +301,22 @@ mvn test
 产物：
 
 - `dbshift-core/target/dbshift-core-1.0.0-SNAPSHOT.jar` — 框架库
+- `dbshift-cli/target/dbshift-cli-1.0.0-SNAPSHOT.jar` — CLI（shade，含可选 H2）
 - `dbshift-spring-boot-starter/target/dbshift-spring-boot-starter-1.0.0-SNAPSHOT.jar` — Spring Boot 集成
+
+## CLI
+
+```bash
+# 需自行把目标库 JDBC 驱动加入 classpath（H2 已可选打进 shade jar）
+java -cp "dbshift-cli/target/dbshift-cli-1.0.0-SNAPSHOT.jar:postgresql.jar" \
+  com.dbshift.cli.DbshiftCliMain info -e dev -c dbshift.yaml
+
+java -cp "...:driver.jar" com.dbshift.cli.DbshiftCliMain migrate -e dev -c dbshift.yaml
+java -cp "...:driver.jar" com.dbshift.cli.DbshiftCliMain baseline -e dev --version 1.1 -c dbshift.yaml
+java -cp "...:driver.jar" com.dbshift.cli.DbshiftCliMain repair -e dev -c dbshift.yaml
+java -cp "...:driver.jar" com.dbshift.cli.DbshiftCliMain validate -c dbshift.yaml
+java -cp "...:driver.jar" com.dbshift.cli.DbshiftCliMain plan -e dev -c dbshift.yaml -f html -o plan.html
+```
 
 ## 配置
 
@@ -298,32 +328,39 @@ environments:
     url: jdbc:postgresql://localhost:5432/app_dev
     user: app
     password: ${DB_PASSWORD:secret}
-    schema: public          # 可选，用于 schema diff 和元数据查询
-    # dialect: postgresql   # 可选，不填则从 url 自动识别
-
-  local:
-    url: jdbc:sqlite:./data/app.db
-    user: ""
-    password: ""
-
-  staging:
-    url: jdbc:mysql://localhost:3306/app_staging?serverTimezone=UTC
-    user: root
-    password: ${DB_PASSWORD:root}
+    schema: public
+    # dialect: postgresql
 
 migrations:
-  dir: ./example/db/migrations
+  dir: ./db/migrations
 
 rollback:
-  dir: ./example/db/rollback
+  dir: ./db/rollback
+
+placeholders:
+  schema: public
+  tablePrefix: ""
+
+baselineOnMigrate: false
+baselineVersion: "1"
+outOfOrder: false
+
+autoMigrate:
+  enabled: false
+  environment: ${DBSHIFT_ENV:dev}
+  initOnStartup: true
+  failOnError: true
+  appliedBy: app
+  requireConfirmForProd: true
 ```
 
-支持 `${ENV_VAR:default}` 环境变量替换。
+支持配置与 SQL 中的 `${ENV_VAR:default}` / `${placeholder}` 替换。
 
 ## 命名规范
 
-- 正向迁移：`V001__description.sql`（版本号连续）
-- 回滚脚本：`U001__description.sql`（与 V 编号对应）
+- Versioned：`V1__desc.sql` / `V001__desc.sql` / `V1_2__desc.sql` / `V1.2.3__desc.sql`
+- Repeatable：`R__refresh_views.sql`（checksum 变化时重跑）
+- Undo：`U1__desc.sql`（与 V 版本对应）
 
 ## 安全说明
 

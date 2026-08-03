@@ -20,6 +20,13 @@ migrations:
 rollback:
   dir: ./example/db/rollback
 
+placeholders:
+  schema: public
+
+baselineOnMigrate: false
+baselineVersion: "1"
+outOfOrder: false
+
 # 集成到 Java 项目时开启：应用启动自动执行 pending 迁移
 autoMigrate:
   enabled: false

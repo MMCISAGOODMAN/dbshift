@@ -9,13 +9,17 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 import com.dbshift.config.DbshiftConfig;
+import com.dbshift.model.ChangelogEntry;
 import com.dbshift.model.MigrationFile;
 import com.dbshift.model.ValidationResult;
+import com.dbshift.model.Version;
 
 public class MigrationValidator {
 
-    private static final Pattern MIGRATION_FILENAME = Pattern.compile("^V\\d+__.+\\.sql$", Pattern.CASE_INSENSITIVE);
-    private static final Pattern ROLLBACK_FILENAME = Pattern.compile("^U\\d+__.+\\.sql$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern VERSIONED_FILENAME =
+            Pattern.compile("^[VU]\\d+(?:[._]\\d+)*__.+\\.sql$", Pattern.CASE_INSENSITIVE);
+    private static final Pattern REPEATABLE_FILENAME =
+            Pattern.compile("^R__.+\\.sql$", Pattern.CASE_INSENSITIVE);
 
     private final MigrationLoader migrationLoader;
 
@@ -35,21 +39,20 @@ public class MigrationValidator {
             return result;
         }
 
-        validateFilenames(migrationsDir, MIGRATION_FILENAME, "migration", result);
+        validateMigrationDirFilenames(migrationsDir, result);
 
         if (Files.exists(rollbackDir)) {
-            validateFilenames(rollbackDir, ROLLBACK_FILENAME, "rollback", result);
+            validateRollbackFilenames(rollbackDir, result);
         } else {
             result.addWarning("Rollback directory not found: " + rollbackDir.toAbsolutePath());
         }
 
         List<MigrationFile> migrations = migrationLoader.loadMigrations(migrationsDir);
         if (migrations.isEmpty()) {
-            result.addWarning("No migration scripts found.");
-            return result;
+            result.addWarning("No versioned migration scripts found.");
+        } else {
+            validateUniqueness(migrations, result);
         }
-
-        validateSequence(migrations, result);
 
         List<MigrationFile> rollbacks = migrationLoader.loadRollbacks(rollbackDir);
         for (MigrationFile migration : migrations) {
@@ -62,12 +65,15 @@ public class MigrationValidator {
         return result;
     }
 
-    public ValidationResult validateChecksums(DbshiftConfig config, List<com.dbshift.model.ChangelogEntry> applied) throws IOException {
+    public ValidationResult validateChecksums(DbshiftConfig config, List<ChangelogEntry> applied) throws IOException {
         ValidationResult result = new ValidationResult();
         result.setValid(true);
 
         List<MigrationFile> migrations = migrationLoader.loadMigrations(Path.of(config.getMigrations().getDir()));
-        for (com.dbshift.model.ChangelogEntry entry : applied) {
+        for (ChangelogEntry entry : applied) {
+            if ("BASELINE".equalsIgnoreCase(entry.getScriptType())) {
+                continue;
+            }
             MigrationFile file = migrationLoader.findMigration(migrations, entry.getVersion());
             if (file == null) {
                 result.addError("Applied version " + entry.getVersion() + " not found in migration files.");
@@ -81,32 +87,40 @@ public class MigrationValidator {
         return result;
     }
 
-    private void validateFilenames(Path dir, Pattern pattern, String label, ValidationResult result) throws IOException {
+    private void validateMigrationDirFilenames(Path dir, ValidationResult result) throws IOException {
         try (var stream = Files.list(dir)) {
             stream.filter(p -> p.toString().endsWith(".sql")).forEach(path -> {
                 String name = path.getFileName().toString();
-                if (!pattern.matcher(name).matches()) {
-                    result.addError("Invalid " + label + " filename: " + name
-                            + " (expected e.g. V001__description.sql or U001__description.sql)");
+                boolean ok = (VERSIONED_FILENAME.matcher(name).matches()
+                        && name.toUpperCase().startsWith("V"))
+                        || REPEATABLE_FILENAME.matcher(name).matches();
+                if (!ok) {
+                    result.addError("Invalid migration filename: " + name
+                            + " (expected V1__desc.sql, V1_2__desc.sql or R__desc.sql)");
                 }
             });
         }
     }
 
-    private void validateSequence(List<MigrationFile> migrations, ValidationResult result) {
-        Set<Integer> seen = new HashSet<>();
-        int expected = migrations.get(0).versionNumber();
+    private void validateRollbackFilenames(Path dir, ValidationResult result) throws IOException {
+        try (var stream = Files.list(dir)) {
+            stream.filter(p -> p.toString().endsWith(".sql")).forEach(path -> {
+                String name = path.getFileName().toString();
+                if (!VERSIONED_FILENAME.matcher(name).matches() || !name.toUpperCase().startsWith("U")) {
+                    result.addError("Invalid rollback filename: " + name
+                            + " (expected U1__desc.sql or U1_2__desc.sql)");
+                }
+            });
+        }
+    }
+
+    private void validateUniqueness(List<MigrationFile> migrations, ValidationResult result) {
+        Set<Version> seen = new HashSet<>();
         for (MigrationFile migration : migrations) {
-            int num = migration.versionNumber();
-            if (seen.contains(num)) {
-                result.addError("Duplicate migration version number: V" + num);
+            Version version = migration.getParsedVersion();
+            if (!seen.add(version)) {
+                result.addError("Duplicate migration version: " + migration.getVersion());
             }
-            seen.add(num);
-            if (num != expected) {
-                result.addError("Migration sequence gap or disorder: expected V"
-                        + String.format("%03d", expected) + " but found " + migration.getVersion());
-            }
-            expected = num + 1;
         }
     }
 }

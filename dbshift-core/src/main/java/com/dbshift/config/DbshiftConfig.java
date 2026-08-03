@@ -9,6 +9,10 @@ public class DbshiftConfig {
     private PathConfig migrations = new PathConfig("./db/migrations");
     private PathConfig rollback = new PathConfig("./db/rollback");
     private AutoMigrateSettings autoMigrate = new AutoMigrateSettings();
+    private Map<String, String> placeholders = new LinkedHashMap<>();
+    private boolean baselineOnMigrate = false;
+    private String baselineVersion = "1";
+    private boolean outOfOrder = false;
 
     public Map<String, EnvironmentConfig> getEnvironments() {
         return environments;
@@ -40,6 +44,38 @@ public class DbshiftConfig {
 
     public void setAutoMigrate(AutoMigrateSettings autoMigrate) {
         this.autoMigrate = autoMigrate;
+    }
+
+    public Map<String, String> getPlaceholders() {
+        return placeholders;
+    }
+
+    public void setPlaceholders(Map<String, String> placeholders) {
+        this.placeholders = placeholders != null ? placeholders : new LinkedHashMap<>();
+    }
+
+    public boolean isBaselineOnMigrate() {
+        return baselineOnMigrate;
+    }
+
+    public void setBaselineOnMigrate(boolean baselineOnMigrate) {
+        this.baselineOnMigrate = baselineOnMigrate;
+    }
+
+    public String getBaselineVersion() {
+        return baselineVersion;
+    }
+
+    public void setBaselineVersion(String baselineVersion) {
+        this.baselineVersion = baselineVersion;
+    }
+
+    public boolean isOutOfOrder() {
+        return outOfOrder;
+    }
+
+    public void setOutOfOrder(boolean outOfOrder) {
+        this.outOfOrder = outOfOrder;
     }
 
     public EnvironmentConfig requireEnvironment(String name) {

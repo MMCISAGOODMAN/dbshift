@@ -13,6 +13,7 @@
 
     <modules>
         <module>dbshift-core</module>
+        <module>dbshift-cli</module>
         <module>dbshift-spring-boot-starter</module>
     </modules>
 
@@ -24,5 +25,7 @@
         <jsqlparser.version>4.9</jsqlparser.version>
         <snakeyaml.version>2.2</snakeyaml.version>
         <junit.version>5.10.2</junit.version>
+        <picocli.version>4.7.5</picocli.version>
+        <h2.version>2.2.224</h2.version>
     </properties>
 </project>

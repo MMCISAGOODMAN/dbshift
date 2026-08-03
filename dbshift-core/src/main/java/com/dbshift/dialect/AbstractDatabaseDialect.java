@@ -10,7 +10,7 @@ abstract class AbstractDatabaseDialect implements DatabaseDialect {
 
     private static final String CHANGELOG_DDL = """
             CREATE TABLE IF NOT EXISTS schema_changelog (
-                version VARCHAR(32) PRIMARY KEY,
+                version VARCHAR(100) PRIMARY KEY,
                 description VARCHAR(255) NOT NULL,
                 checksum VARCHAR(64) NOT NULL,
                 applied_at TIMESTAMP NOT NULL,
@@ -21,9 +21,23 @@ abstract class AbstractDatabaseDialect implements DatabaseDialect {
             )
             """;
 
+    private static final String LOCK_DDL = """
+            CREATE TABLE IF NOT EXISTS schema_changelog_lock (
+                id INT PRIMARY KEY,
+                locked BOOLEAN NOT NULL,
+                locked_by VARCHAR(255),
+                locked_at TIMESTAMP
+            )
+            """;
+
     @Override
     public String createChangelogTableSql() {
         return CHANGELOG_DDL;
+    }
+
+    @Override
+    public String createLockTableSql() {
+        return LOCK_DDL;
     }
 
     @Override
@@ -34,6 +48,16 @@ abstract class AbstractDatabaseDialect implements DatabaseDialect {
     @Override
     public String successLiteral() {
         return "TRUE";
+    }
+
+    @Override
+    public String lockedTrueLiteral() {
+        return "TRUE";
+    }
+
+    @Override
+    public String lockedFalseLiteral() {
+        return "FALSE";
     }
 
     @Override
